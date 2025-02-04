@@ -38,8 +38,10 @@ import (
 	"github.com/Mellanox/nic-configuration-operator/pkg/types"
 )
 
-const pciDevicesPath = "/sys/bus/pci/devices"
-const arrayPrefix = "Array"
+const (
+	pciDevicesPath = "/sys/bus/pci/devices"
+	arrayPrefix    = "Array"
+)
 
 // HostUtils is an interface that contains util functions that perform operations on the actual host
 type HostUtils interface {
@@ -377,16 +379,18 @@ func (h *hostUtils) GetRDMADeviceName(pciAddr string) string {
 // queryMSTConfig runs a query on mstconfig to parse out default, current and nextboot configurations
 // might run recursively to expand array parameters' values
 func (h *hostUtils) queryMSTConfig(ctx context.Context, query types.NvConfigQuery, pciAddr string, additionalParameter string) error {
-	log.Log.Info(fmt.Sprintf("mstconfig -d %s query %s", pciAddr, additionalParameter)) //TODO change verbosity
+	log.Log.Info(fmt.Sprintf("mstconfig -d %s query %s", pciAddr, additionalParameter)) // TODO change verbosity
 	valueInBracketsRegex := regexp.MustCompile(`^(.*?)\(([^)]*)\)$`)
-
-	var cmd execUtils.Cmd
+	var (
+		output []byte
+		err    error
+	)
 	if additionalParameter == "" {
-		cmd = h.execInterface.CommandContext(ctx, "mstconfig", "-d", pciAddr, "-e", "query")
+		output, err = h.runCommand(ctx, "mstconfig", "-d", pciAddr, "-e", "query")
 	} else {
-		cmd = h.execInterface.CommandContext(ctx, "mstconfig", "-d", pciAddr, "-e", "query", additionalParameter)
+		output, err = h.runCommand(ctx, "mstconfig", "-d", pciAddr, "-e", "query", additionalParameter)
 	}
-	output, err := cmd.Output()
+
 	if err != nil {
 		log.Log.Error(err, "queryMSTConfig(): Failed to run mstconfig", "output", string(output))
 		return err
@@ -498,8 +502,7 @@ func (h *hostUtils) QueryNvConfig(ctx context.Context, pciAddr string) (types.Nv
 func (h *hostUtils) SetNvConfigParameter(pciAddr string, paramName string, paramValue string) error {
 	log.Log.Info("HostUtils.SetNvConfigParameter()", "pciAddr", pciAddr, "paramName", paramName, "paramValue", paramValue)
 
-	cmd := h.execInterface.Command("mstconfig", "-d", pciAddr, "--yes", "set", paramName+"="+paramValue)
-	_, err := cmd.Output()
+	_, err := h.runCommand(context.TODO(), "mstconfig", "-d", pciAddr, "--yes", "set", paramName+"="+paramValue)
 	if err != nil {
 		log.Log.Error(err, "SetNvConfigParameter(): Failed to run mstconfig")
 		return err
@@ -511,12 +514,12 @@ func (h *hostUtils) SetNvConfigParameter(pciAddr string, paramName string, param
 func (h *hostUtils) ResetNvConfig(pciAddr string) error {
 	log.Log.Info("HostUtils.ResetNvConfig()", "pciAddr", pciAddr)
 
-	cmd := h.execInterface.Command("mstconfig", "-d", pciAddr, "--yes", "reset")
-	_, err := cmd.Output()
+	_, err := h.runCommand(context.TODO(), "mstconfig", "-d", pciAddr, "--yes", "reset")
 	if err != nil {
 		log.Log.Error(err, "ResetNvConfig(): Failed to run mstconfig")
 		return err
 	}
+
 	return nil
 }
 
@@ -525,9 +528,7 @@ func (h *hostUtils) ResetNvConfig(pciAddr string) error {
 // IB devices need to communicate with other nodes for confirmation
 func (h *hostUtils) ResetNicFirmware(ctx context.Context, pciAddr string) error {
 	log.Log.Info("HostUtils.ResetNicFirmware()", "pciAddr", pciAddr)
-
-	cmd := h.execInterface.CommandContext(ctx, "mlxfwreset", "--device", pciAddr, "reset", "--yes")
-	_, err := cmd.Output()
+	_, err := h.runCommand(ctx, "mlxfwreset", "--device", pciAddr, "reset", "--yes")
 	if err != nil {
 		log.Log.Error(err, "ResetNicFirmware(): Failed to run mlxfwreset")
 		return err
@@ -557,8 +558,7 @@ func (h *hostUtils) SetMaxReadRequestSize(pciAddr string, maxReadRequestSize int
 		return err
 	}
 
-	cmd := h.execInterface.Command("setpci", "-s", pciAddr, fmt.Sprintf("CAP_EXP+08.w=%d000:F000", valueToApply))
-	_, err := cmd.Output()
+	_, err := h.runCommand(context.TODO(), "setpci", "-s", pciAddr, fmt.Sprintf("CAP_EXP+08.w=%d000:F000", valueToApply))
 	if err != nil {
 		log.Log.Error(err, "SetMaxReadRequestSize(): Failed to run setpci")
 		return err
@@ -645,6 +645,27 @@ func (h *hostUtils) GetHostUptimeSeconds() (time.Duration, error) {
 	uptimeSeconds, _ := strconv.ParseFloat(uptimeStr, 64)
 
 	return time.Duration(uptimeSeconds) * time.Second, nil
+}
+
+func (h *hostUtils) runCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd := h.execInterface.CommandContext(ctx, name, args...)
+
+	// Capture stderr and wrap it into an error
+	var stderrBuf strings.Builder
+	cmd.SetStderr(&stderrBuf)
+
+	output, err := cmd.Output()
+	stderr := strings.TrimSpace(stderrBuf.String())
+	log.Log.V(2).Info("Executing command", "command", name, "args", args, "output", output, "stderr", stderr)
+	if err != nil {
+		if stderr == "" {
+			return output, err
+		}
+
+		return output, fmt.Errorf("%s: %s", err, stderr)
+	}
+
+	return output, nil
 }
 
 func NewHostUtils() HostUtils {
