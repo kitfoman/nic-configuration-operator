@@ -21,10 +21,11 @@ import (
 	"fmt"
 	"os"
 	"reflect"
-	"sync"
+	"strconv"
 	"time"
 
 	maintenanceoperator "github.com/Mellanox/maintenance-operator/api/v1alpha1"
+	"golang.org/x/sync/errgroup"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -423,30 +424,34 @@ func (r *NicDeviceReconciler) ensureMaintenance(ctx context.Context) (ctrl.Resul
 }
 
 // runInParallel runs a given function in parallel for each of the nicDevice statuses
-// returns an error if at least one status holds an error, nil otherwise
+// with configurable concurrency limiting via MFT_CONCURRENCY_LIMIT env variable.
+// Returns an error if at least one status holds an error, nil otherwise.
 func runInParallel(ctx context.Context, statuses nicDeviceConfigurationStatuses, f func(ctx context.Context, status *nicDeviceConfigurationStatus) error) error {
-	var wg sync.WaitGroup
+	var g errgroup.Group
+	g.SetLimit(getMFTConcurrencyLimit())
 
-	observedErrors := make([]error, len(statuses))
-
-	for i := 0; i < len(statuses); i++ {
-		wg.Add(1)
-		go func(index int) {
-			defer wg.Done()
-			err := f(ctx, statuses[index])
-			observedErrors[index] = err
-		}(i)
+	for _, status := range statuses {
+		g.Go(func() error {
+			return f(ctx, status)
+		})
 	}
 
-	wg.Wait()
+	return g.Wait()
+}
 
-	for _, observedErr := range observedErrors {
-		if observedErr != nil {
-			return observedErr
-		}
+// getMFTConcurrencyLimit returns the MFT operation concurrency limit from env variable.
+// Returns -1 (unlimited) if not set or invalid.
+func getMFTConcurrencyLimit() int {
+	limit := os.Getenv("MFT_CONCURRENCY_LIMIT")
+	if limit == "" {
+		return -1 // unlimited by default
 	}
-
-	return nil
+	n, err := strconv.Atoi(limit)
+	if err != nil || n <= 0 {
+		log.Log.Info("Invalid MFT_CONCURRENCY_LIMIT, using unlimited", "value", limit)
+		return -1
+	}
+	return n
 }
 
 // applyRuntimeConfig applies device's runtime spec
